@@ -44,8 +44,8 @@ typedef enum {
   VKVideoPlayerStateContentLoading,
   VKVideoPlayerStateContentPlaying,
   VKVideoPlayerStateContentPaused,
-  VKVideoPlayerStateSuspend,
-  VKVideoPlayerStateDismissed,
+  VKVideoPlayerStateSuspended,        // Player suspended for ad playback
+  VKVideoPlayerStateDismissed,      // Player dismissed when dismissing view controller
   VKVideoPlayerStateError
 } VKVideoPlayerState;
 
@@ -59,13 +59,14 @@ typedef enum {
   VKVideoPlayerControlEventTapVideoQuality,
   VKVideoPlayerControlEventSwipeNext,
   VKVideoPlayerControlEventSwipePrevious,
+  VKVideoPlayerControlEventTapPlay,
+  VKVideoPLayerControlEventTapPause
 } VKVideoPlayerControlEvent;
 
 
 @class VKVideoPlayer;
 @protocol VKVideoPlayerDelegate <NSObject>
 @optional
-- (BOOL)shouldVideoPlayer:(VKVideoPlayer*)videoPlayer changeStateTo:(VKVideoPlayerState)toState;
 - (void)videoPlayer:(VKVideoPlayer*)videoPlayer willChangeStateTo:(VKVideoPlayerState)toState;
 - (void)videoPlayer:(VKVideoPlayer*)videoPlayer didChangeStateFrom:(VKVideoPlayerState)fromState;
 - (BOOL)shouldVideoPlayer:(VKVideoPlayer*)videoPlayer startVideo:(id<VKVideoPlayerTrackProtocol>)track;
@@ -126,6 +127,7 @@ VKVideoPlayerViewDelegate
 @property (nonatomic, assign) CGRect landscapeFrame;
 @property (nonatomic, assign) BOOL forceRotate;
 
+@property (nonatomic, assign) BOOL isReadyToPlay;
 
 - (id)initWithVideoPlayerView:(VKVideoPlayerView*)videoPlayerView;
 
@@ -143,6 +145,7 @@ VKVideoPlayerViewDelegate
 - (void)loadVideoWithTrack:(id<VKVideoPlayerTrackProtocol>)track;
 - (void)loadVideoWithStreamURL:(NSURL*)streamURL;
 - (void)reloadCurrentVideoTrack;
+- (void)initPlayerWithTrack:(id<VKVideoPlayerTrackProtocol>)track;
 - (VKVideoPlayerView*)activePlayerView;
 
 #pragma mark - Controls
@@ -151,6 +154,7 @@ VKVideoPlayerViewDelegate
 - (void)pauseContentWithCompletionHandler:(void (^)())completionHandler;
 - (void)pauseContent:(BOOL)isUserAction completionHandler:(void (^)())completionHandler;
 - (void)updateTrackControls;
+- (void)dismiss;
 
 #pragma mark - Captions
 - (void)clearCaptions;
@@ -161,4 +165,8 @@ VKVideoPlayerViewDelegate
 
 - (void)updateCaptionView:(DTAttributedLabel*)captionView caption:(id<VKVideoPlayerCaptionProtocol>)caption playerView:(VKVideoPlayerView*)playerView;
 - (void)clearCaptionView:(DTAttributedLabel*)captionView;
+
+#pragma mark - Ad State Support
+- (BOOL)beginAdPlayback;
+- (BOOL)endAdPlayback;
 @end

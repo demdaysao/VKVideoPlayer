@@ -99,7 +99,6 @@ typedef enum {
   self.scrubbing = NO;
   self.beforeSeek = 0.0;
   self.previousPlaybackTime = 0;
-//  self.supportedOrientations = [[UIApplication sharedApplication] supportedInterfaceOrientationsForWindow:[[UIApplication sharedApplication] keyWindow]];
   self.supportedOrientations = VKSharedUtility.isPad ? UIInterfaceOrientationMaskAll : UIInterfaceOrientationMaskAllButUpsideDown;
 
   self.forceRotate = NO;
@@ -124,7 +123,7 @@ typedef enum {
 - (void)loadCurrentVideoTrack {
   __weak __typeof__(self) weakSelf = self;
   RUN_ON_UI_THREAD(^{
-    [weakSelf playVideoTrack:self.videoTrack];
+    [weakSelf initPlayerWithTrack:self.videoTrack];
   });
 }
 
@@ -364,15 +363,16 @@ typedef enum {
   return self.externalMonitor.isConnected;
 }
 
-#pragma mark - Hundle Videos
+#pragma mark - Handle Videos
 - (void)loadVideoWithTrack:(id<VKVideoPlayerTrackProtocol>)track {
-  self.track = track;
-  self.state = VKVideoPlayerStateContentLoading;
-
   VoidBlock completionHandler = ^{
-    [self playVideoTrack:self.track];
+    self.track = track;
+    [self initPlayerWithTrack:self.track];
   };
+  
   switch (self.state) {
+    case VKVideoPlayerStateUnknown:
+    case VKVideoPlayerStateSuspended:
     case VKVideoPlayerStateError:
     case VKVideoPlayerStateContentPaused:
     case VKVideoPlayerStateContentLoading:
@@ -390,15 +390,16 @@ typedef enum {
 }
 
 - (void)setTrack:(id<VKVideoPlayerTrackProtocol>)track {
-  
-  _track = track;
+  // Clear player before loading new track
   [self clearPlayer];
   
-  [[NSNotificationCenter defaultCenter] postNotificationName:kVKVideoPlayerUpdateVideoTrack object:track];
-
+  // Load new track and update views
+  _track = track;
   self.view.titleLabel.text = [track title];
-  
   [self updateTrackControls];
+  
+  // Post notification once track has been changed
+  [[NSNotificationCenter defaultCenter] postNotificationName:kVKVideoPlayerUpdateVideoTrack object:track];
 }
 
 
@@ -408,27 +409,29 @@ typedef enum {
   self.player = nil;
 }
 
-- (void)playVideoTrack:(id<VKVideoPlayerTrackProtocol>)track {
-  if ([self.delegate respondsToSelector:@selector(shouldVideoPlayer:startVideo:)]) {
-    if (![self.delegate shouldVideoPlayer:self startVideo:track]) {
-      return;
-    }
-  }
-  [self clearPlayer];
+// NOTE: This method can be overridden if you want to selectively init different players
+- (void)initPlayerWithTrack:(id<VKVideoPlayerTrackProtocol>)track {
+  // Reset isReadyToPlay property
+  self.isReadyToPlay = NO;
   
   if (!track.isVideoLoadedBefore) {
     track.isVideoLoadedBefore = YES;
   }
-
+  
+  // Get the stream url
   NSURL *streamURL = [track streamURL];
+  
+  // If no stream found, handle error
   if (!streamURL) {
+    [self handleErrorCode:kVideoPlayerErrorFetchStreamError track:track];
+    DDLogWarn(@"Unable to fetch stream");
     return;
   }
   
-  [self playOnAVPlayer:streamURL playerLayerView:[self activePlayerView].playerLayerView track:track];
-}
-
-- (void)playOnAVPlayer:(NSURL*)streamURL playerLayerView:(VKVideoPlayerLayerView*)playerLayerView track:(id<VKVideoPlayerTrackProtocol>)track {
+  // Content now loading
+  self.state = VKVideoPlayerStateContentLoading;
+  
+  // Get asset to create AVPlayerItem and AVPlayer
   AVURLAsset* asset = [[AVURLAsset alloc] initWithURL:streamURL options:@{ AVURLAssetPreferPreciseDurationAndTimingKey : @YES }];
   [asset loadValuesAsynchronouslyForKeys:@[kTracksKey, kPlayableKey] completionHandler:^{
     // Completion handler block.
@@ -441,31 +444,42 @@ typedef enum {
       NSError *error = nil;
       AVKeyValueStatus status = [asset statusOfValueForKey:kTracksKey error:&error];
       if (status == AVKeyValueStatusLoaded) {
+        // Init AVPlayerItem and AVPlayer
         self.playerItem = [AVPlayerItem playerItemWithAsset:asset];
         self.avPlayer = [self playerWithPlayerItem:self.playerItem];
         self.player = (id<VKPlayer>)self.avPlayer;
-        [playerLayerView setPlayer:self.avPlayer];
-        
+        [[self activePlayerView].playerLayerView setPlayer:self.avPlayer];
       } else {
         // You should deal with the error appropriately.
         [self handleErrorCode:kVideoPlayerErrorAssetLoadError track:track];
         DDLogWarn(@"The asset's tracks were not loaded:\n%@", error);
       }
     });
-  }];  
+  }];
 }
 
 - (void)playerItemReadyToPlay {
-  
   DDLogVerbose(@"Player: playerItemReadyToPlay");
+  
+  // Set isReadyToPlay property to true to signify that media is ready
+  self.isReadyToPlay = YES;
   
   RUN_ON_UI_THREAD(^{
     switch (self.state) {
-      case VKVideoPlayerStateContentPaused:
-        break;
-      case VKVideoPlayerStateContentLoading:{}
+      case VKVideoPlayerStateContentLoading:
       case VKVideoPlayerStateError:{
+        /**
+         * If player is loading or in error state
+         * Pause player and then check if should auto play
+         */
         [self pauseContent:NO completionHandler:^{
+          // If should not auto start video, return
+          if ([self.delegate respondsToSelector:@selector(shouldVideoPlayer:startVideo:)]) {
+            if (![self.delegate shouldVideoPlayer:self startVideo:self.track]) {
+              return;
+            }
+          }
+          // Start the video by seeking to last watched duration
           if ([self.delegate respondsToSelector:@selector(videoPlayer:willStartVideo:)]) {
             [self.delegate videoPlayer:self willStartVideo:self.track];
           }
@@ -474,6 +488,14 @@ typedef enum {
         break;
       }
       default:
+        /** 
+         * Do nothing if player is:
+         * Unknown
+         * Paused
+         * Playing
+         * Suspended
+         * Dismissed
+         */
         break;
     }    
   });
@@ -529,10 +551,11 @@ typedef enum {
 }
 
 - (void)reloadCurrentVideoTrack {
+  __weak __typeof__(self) weakSelf = self;
   RUN_ON_UI_THREAD(^{
     VoidBlock completionHandler = ^{
-      self.state = VKVideoPlayerStateContentLoading;
-      [self loadCurrentVideoTrack];
+      weakSelf.state = VKVideoPlayerStateContentLoading;
+      [weakSelf initPlayerWithTrack:self.videoTrack];
     };
     
     switch (self.state) {
@@ -548,7 +571,7 @@ typedef enum {
         [self pauseContent:NO completionHandler:completionHandler];
         break;
       case VKVideoPlayerStateDismissed:
-      case VKVideoPlayerStateSuspend:
+      case VKVideoPlayerStateSuspended:
         break;
     }
   });
@@ -641,6 +664,8 @@ typedef enum {
     }
   }
   
+  
+  // Observer AVPlayer and AVPlayerItem to determine when media is ready to play
   if (object == self.avPlayer) {
     if ([keyPath isEqualToString:@"status"]) {
       switch ([self.avPlayer status]) {
@@ -693,7 +718,32 @@ typedef enum {
   }
 }
 
+#pragma mark - Ad State Support
+- (BOOL)beginAdPlayback {
+  switch (self.state) {
+    case VKVideoPlayerStateDismissed:
+    case VKVideoPlayerStateError:
+      // Do not play ad in these states
+      return NO;
+    case VKVideoPlayerStateContentPlaying:
+      [self pauseContent];
+    case VKVideoPlayerStateContentLoading:
+    case VKVideoPlayerStateContentPaused:
+      self.state = VKVideoPlayerStateSuspended;
+      return YES;
+    default:
+      return NO;
+  }
+}
 
+- (BOOL)endAdPlayback {
+  if (self.state == VKVideoPlayerStateSuspended) {
+    [self pauseContent];
+    [self playContent];
+    return YES;
+  }
+  return NO;
+}
 
 #pragma mark - Controls
 
@@ -711,7 +761,7 @@ typedef enum {
     case VKVideoPlayerStateContentPlaying:
       return @"ContentPlaying";
       break;
-    case VKVideoPlayerStateSuspend:
+    case VKVideoPlayerStateSuspended:
       return @"Player Stay";
       break;
     case VKVideoPlayerStateDismissed:
@@ -725,11 +775,6 @@ typedef enum {
 
 
 - (void)setState:(VKVideoPlayerState)newPlayerState {
-  if ([self.delegate respondsToSelector:@selector(shouldVideoPlayer:changeStateTo:)]) {
-    if (![self.delegate shouldVideoPlayer:self changeStateTo:newPlayerState]) {
-      return;
-    }
-  }
   RUN_ON_UI_THREAD(^{
     if ([self.delegate respondsToSelector:@selector(videoPlayer:willChangeStateTo:)]) {
       [self.delegate videoPlayer:self willChangeStateTo:newPlayerState];
@@ -775,7 +820,6 @@ typedef enum {
         self.view.captionTopContainerView.hidden = NO;
         self.view.messageLabel.hidden = YES;
         self.view.externalDeviceView.hidden = ![self isPlayingOnExternalDevice];
-        [self.player play];
       } break;
       case VKVideoPlayerStateContentPaused:
         self.playerControlsEnabled = YES;
@@ -787,12 +831,10 @@ typedef enum {
         self.view.bigPlayButton.hidden = NO;
         self.view.messageLabel.hidden = YES;
         self.view.externalDeviceView.hidden = ![self isPlayingOnExternalDevice];
-        [self.player pause];
         break;
-      case VKVideoPlayerStateSuspend:
+      case VKVideoPlayerStateSuspended:
         break;
       case VKVideoPlayerStateError:{
-        [self.player pause];
         self.view.externalDeviceView.hidden = YES;
         self.view.playerLayerView.hidden = YES;
         self.playerControlsEnabled = NO;
@@ -803,8 +845,7 @@ typedef enum {
       case VKVideoPlayerStateDismissed:
         self.view.playerLayerView.hidden = YES;
         self.playerControlsEnabled = NO;
-        self.avPlayer = nil;
-        self.playerItem = nil;
+        [self clearPlayer];
         break;
     }
     
@@ -819,11 +860,10 @@ typedef enum {
 }
 
 - (void)playContent {
-  RUN_ON_UI_THREAD(^{
-    if (self.state == VKVideoPlayerStateContentPaused) {
-      self.state = VKVideoPlayerStateContentPlaying;
-    }
-  });
+  if (self.state == VKVideoPlayerStateContentPaused && self.isReadyToPlay) {
+    [self.player play];
+    self.state = VKVideoPlayerStateContentPlaying;
+  }
 }
 
 - (void)pauseContent {
@@ -840,12 +880,13 @@ typedef enum {
 
     switch ([self.playerItem status]) {
       case AVPlayerItemStatusFailed:
+        [self.player pause];
         self.state = VKVideoPlayerStateError;
         return;
         break;
       case AVPlayerItemStatusUnknown:
         DDLogVerbose(@"Trying to pause content but AVPlayerItemStatusUnknown.");
-        self.state = VKVideoPlayerStateContentLoading;
+        self.state = VKVideoPlayerStateUnknown;
         return;
         break;
       default:
@@ -854,12 +895,13 @@ typedef enum {
     
     switch ([self.avPlayer status]) {
       case AVPlayerStatusFailed:
+        [self.player pause];
         self.state = VKVideoPlayerStateError;
         return;
         break;
       case AVPlayerStatusUnknown:
         DDLogVerbose(@"Trying to pause content but AVPlayerStatusUnknown.");
-        self.state = VKVideoPlayerStateContentLoading;
+        self.state = VKVideoPlayerStateUnknown;
         return;
         break;
       default:
@@ -870,8 +912,9 @@ typedef enum {
       case VKVideoPlayerStateContentLoading:
       case VKVideoPlayerStateContentPlaying:
       case VKVideoPlayerStateContentPaused:
-      case VKVideoPlayerStateSuspend:
+      case VKVideoPlayerStateSuspended:
       case VKVideoPlayerStateError:
+        [self.player pause];
         self.state = VKVideoPlayerStateContentPaused;
         if (completionHandler) completionHandler();
         break;
@@ -895,6 +938,12 @@ typedef enum {
   });
 }
 
+- (void)dismiss {
+  if (self.state == VKVideoPlayerStateContentPlaying) {
+    [self pauseContent];
+  }
+  self.state = VKVideoPlayerStateDismissed;
+}
 
 #pragma mark - VKScrubberDelegate
 
@@ -908,6 +957,7 @@ typedef enum {
 
 - (void)scrubbingEnd {
   _scrubbing = NO;
+  self.state = VKVideoPlayerStateContentLoading;
   float afterSeekTime = self.view.scrubber.value;
   [self scrubbingEndAtSecond:afterSeekTime userAction:YES completionHandler:^(BOOL finished) {
     if (finished) [self playContent];
@@ -961,12 +1011,18 @@ typedef enum {
 
 - (void)playButtonPressed {
   [self playContent];
+  if ([self.delegate respondsToSelector:@selector(videoPlayer:didControlByEvent:)]) {
+    [self.delegate videoPlayer:self didControlByEvent:VKVideoPlayerControlEventTapPlay];
+  }
 }
 
 - (void)pauseButtonPressed {
   switch (self.state) {
     case VKVideoPlayerStateContentPlaying:
       [self pauseContent:YES completionHandler:nil];
+      if ([self.delegate respondsToSelector:@selector(videoPlayer:didControlByEvent:)]) {
+        [self.delegate videoPlayer:self didControlByEvent:VKVideoPLayerControlEventTapPause];
+      }
       break;
     default:
       break;
@@ -1046,11 +1102,7 @@ typedef enum {
 }
 
 - (void)setLoading:(BOOL)loading {
-  if (loading) {
-    [self.view.activityIndicator startAnimating];
-  } else {
-    [self.view.activityIndicator stopAnimating];
-  }
+  [self.view setLoading:loading];
 }
 
 #pragma mark - Handle volume change
